@@ -127,8 +127,9 @@ class DetailActivity : Activity() {
         return when (classText) {
             "Flipper Zero" -> "Portable multi-tool for pentesters and geeks. Can emulate RFID, NFC, sub-GHz remotes, and more. Commonly used for security research and sometimes malicious replay attacks."
             "Pwnagotchi" -> "AI-powered WiFi auditing tool built on Raspberry Pi. Passively captures WPA handshakes to audit wireless network security. Often carried by security researchers."
+            "WiFi Pineapple" -> "Rogue access point and WiFi auditing platform by Hak5. Used for man-in-the-middle attacks, credential harvesting, and wireless network reconnaissance. Identified by OUI pattern xx:13:37."
             "Card Skimmer" -> "WARNING: Potential card skimmer detected. HC-05/HC-06 Bluetooth modules are commonly found in illegal skimming devices attached to ATMs, gas pumps, and POS terminals. Exercise caution."
-            "Drone" -> "Unmanned Aerial Vehicle (UAV) detected via BLE Remote ID broadcast. FAA regulations require drones to broadcast identification and location data."
+            "Drone" -> "Unmanned Aerial Vehicle (UAV) detected via BLE Remote ID broadcast or WiFi. FAA regulations require drones to broadcast identification and location data. Coordinates shown below if available."
             "Axon" -> "Axon (formerly TASER International) law enforcement equipment detected. Likely a body-worn camera (Axon Body), conducted energy device, or related accessory."
             "Flock" -> "Flock Safety Automated License Plate Recognition (ALPR) system detected. These cameras are used by law enforcement and private communities to log vehicle plate data."
             "AirTag" -> "Apple AirTag Bluetooth tracker. Can be used legitimately for item tracking but also potentially for unwanted surveillance."
@@ -170,6 +171,10 @@ class DetailActivity : Activity() {
             append("CLASS          : ${deviceClass}\n")
             if (description.isNotEmpty()) {
                 append("DESCRIPTION    : ${description}\n")
+            }
+            if (d.droneLat != null && d.droneLon != null) {
+                append("DRONE LAT      : ${d.droneLat}\n")
+                append("DRONE LON      : ${d.droneLon}\n")
             }
             append("LIVE RSSI      : ${d.rssi}\n")
             append("PACKETS SEEN   : ${d.packetCount}\n")

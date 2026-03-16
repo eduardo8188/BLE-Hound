@@ -8,19 +8,24 @@ import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanRecord
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
-import android.graphics.Typeface
-import android.graphics.Paint
-import android.graphics.drawable.GradientDrawable
 import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
+import android.media.AudioManager
+import android.media.ToneGenerator
+import android.net.wifi.WifiManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.media.AudioManager
-import android.media.ToneGenerator
-import android.os.Vibrator
+import android.os.ParcelUuid
 import android.os.VibrationEffect
+import android.os.Vibrator
 import android.text.TextUtils
 import android.view.Gravity
 import android.view.View
@@ -30,9 +35,13 @@ import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ListView
 import android.widget.TextView
-import androidx.core.app.ActivityCompat
 import androidx.appcompat.widget.AppCompatTextView
+import androidx.core.app.ActivityCompat
 import java.util.LinkedHashMap
+
+// ---------------------------------------------------------------------------
+// Data model
+// ---------------------------------------------------------------------------
 
 data class BleSeenDevice(
     var name: String,
@@ -43,8 +52,15 @@ data class BleSeenDevice(
     var manufacturerText: String,
     var manufacturerDataText: String,
     var serviceUuidsText: String,
-    var rawAdvText: String
-)
+    var rawAdvText: String,
+    var isWifi: Boolean = false,
+    var droneLat: Double? = null,
+    var droneLon: Double? = null
+ )
+
+// ---------------------------------------------------------------------------
+// Global store
+// ---------------------------------------------------------------------------
 
 object BleStore {
     val devices = LinkedHashMap<String, BleSeenDevice>()
@@ -53,10 +69,16 @@ object BleStore {
     var vibrateOnTracker = false
     var soundOnTracker = false
     var trackerSeenThisSession = false
-    var lastTrackerNotifyMs = 0L
+    var lastNotifyMs = 0L
     var lastPacketSeenMs = 0L
     var lastScanRestartMs = 0L
+    var lastDroneBeepMs = 0L
+    var dronePresent = false
 }
+
+// ---------------------------------------------------------------------------
+// Classification
+// ---------------------------------------------------------------------------
 
 fun classifyDevice(d: BleSeenDevice): String {
     val name = d.name.lowercase()
@@ -65,6 +87,18 @@ fun classifyDevice(d: BleSeenDevice): String {
     val svc = d.serviceUuidsText.uppercase()
     val mfgData = d.manufacturerDataText.uppercase()
 
+    // --- WiFi-detected devices (from WiFi scan) ---
+    if (d.isWifi) {
+        if (name.contains("pwnagotchi") || d.address.lowercase().startsWith("de:ad:be")) return "Pwnagotchi"
+        if (name.contains("flipper")) return "Flipper Zero"
+        if (name.contains("dji") || name.contains("parrot") || name.contains("skydio") || name.contains("autel")) return "Drone"
+        // WiFi Pineapple OUI: xx:13:37:xx:xx:xx
+        val bssid = d.address.lowercase()
+        if (bssid.length >= 8 && bssid.substring(3, 5) == "13" && bssid.substring(6, 8) == "37") return "WiFi Pineapple"
+        return "WiFi Device"
+    }
+
+    // --- Apple devices ---
     if (mfg == "APPLE") {
         if ("AIRTAG" in name) return "AirTag"
         if ("FINDMY" in name || "FIND MY" in name) return "Find My"
@@ -76,6 +110,7 @@ fun classifyDevice(d: BleSeenDevice): String {
         return "Apple BLE"
     }
 
+    // --- General BLE ---
     if ("META" in name || "RAYBAN" in name || "RAY-BAN" in name) return "Meta Glasses"
     if ("TILE" in name) return "Tile"
     if ("SMARTTAG" in name || "GALAXY TAG" in name || (mfg == "SAMSNG" && "TAG" in name)) return "Galaxy Tag"
@@ -95,7 +130,8 @@ fun classifyDevice(d: BleSeenDevice): String {
 
     // Flipper Zero
     if (macPrefix == "80:e1:26" || macPrefix == "80:e1:27" || macPrefix == "0c:fa:22" ||
-        "3081" in svc || "3082" in svc || "3083" in svc || "3080" in svc || "FLIPPER" in name) {
+        "3081" in svc || "3082" in svc || "3083" in svc || "3080" in svc || "FLIPPER" in name
+    ) {
         return "Flipper Zero"
     }
 
@@ -136,11 +172,26 @@ fun classifyDevice(d: BleSeenDevice): String {
     return "-"
 }
 
+// ---------------------------------------------------------------------------
+// Category helpers
+// ---------------------------------------------------------------------------
+
+fun isCyberGadgetClass(c: String) = c == "Flipper Zero" || c == "Pwnagotchi" || c == "Card Skimmer" || c == "Dev Board" || c == "WiFi Pineapple"
+fun isDroneClass(c: String) = c == "Drone"
+fun isPoliceClass(c: String) = c == "Axon" || c == "Flock"
+fun isTrackerClass(c: String) = c == "AirTag" || c == "Tile" || c == "Galaxy Tag" || c == "Find My"
+fun isAlertCategory(c: String) = isTrackerClass(c) || isCyberGadgetClass(c) || isDroneClass(c) || isPoliceClass(c)
+
+// ===================================================================
+// MainActivity
+// ===================================================================
+
 class MainActivity : Activity() {
+
     fun getAnimationTick(): Int = animationTick
 
     private lateinit var statusView: TextView
-    private lateinit var trackerLegendView: TextView
+    private lateinit var counterView: TextView
     private lateinit var startButton: Button
     private lateinit var stopButton: Button
     private lateinit var vibrateButton: Button
@@ -151,10 +202,65 @@ class MainActivity : Activity() {
     private var scanner: BluetoothLeScanner? = null
     private var vibrator: Vibrator? = null
     private var toneGenerator: ToneGenerator? = null
+    private var wifiManager: WifiManager? = null
     private var isScannerActive = false
 
     private val uiHandler = Handler(Looper.getMainLooper())
     private var uiDirty = false
+    private var animationTick = 0
+
+    // ---------------------------------------------------------------
+    // WiFi scan receiver
+    // ---------------------------------------------------------------
+
+    private val wifiScanReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (intent.getBooleanExtra(WifiManager.EXTRA_RESULTS_UPDATED, false)) {
+                processWifiResults()
+            }
+        }
+    }
+
+    @Suppress("MissingPermission")
+    private fun processWifiResults() {
+        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) return
+        val results = wifiManager?.scanResults ?: return
+        val now = System.currentTimeMillis()
+        for (r in results) {
+            val bssid = r.BSSID ?: continue
+            val ssid = r.SSID ?: ""
+            val rssi = r.level
+
+            val existing = BleStore.devices[bssid]
+            if (existing == null) {
+                BleStore.devices[bssid] = BleSeenDevice(
+                    name = ssid.ifEmpty { "Hidden Network" },
+                    address = bssid,
+                    rssi = rssi,
+                    packetCount = 1,
+                    lastSeenMs = now,
+                    manufacturerText = "WIFI",
+                    manufacturerDataText = "-",
+                    serviceUuidsText = "-",
+                    rawAdvText = "-",
+                    isWifi = true
+                )
+            } else {
+                if (ssid.isNotEmpty()) existing.name = ssid
+                existing.rssi = rssi
+                existing.packetCount += 1
+                existing.lastSeenMs = now
+            }
+
+            val cls = classifyDevice(BleStore.devices[bssid]!!)
+            if (isAlertCategory(cls)) notifyDeviceDetected()
+        }
+        if (!BleStore.isListFrozen) uiDirty = true
+    }
+
+    // ---------------------------------------------------------------
+    // UI refresh (450 ms tick)
+    // ---------------------------------------------------------------
 
     private val uiRefreshRunnable = object : Runnable {
         override fun run() {
@@ -164,24 +270,63 @@ class MainActivity : Activity() {
             }
             animationTick = (animationTick + 1) % 2
             if (!BleStore.isListFrozen) adapter.notifyDataSetChanged()
+
+            // Continuous drone beep
+            if (BleStore.dronePresent && BleStore.soundOnTracker) {
+                val now = System.currentTimeMillis()
+                if (now - BleStore.lastDroneBeepMs > 1000) {
+                    toneGenerator?.startTone(ToneGenerator.TONE_CDMA_ALERT_CALL_GUARD, 200)
+                    BleStore.lastDroneBeepMs = now
+                }
+            }
+
             uiHandler.postDelayed(this, 450)
         }
     }
 
+    // ---------------------------------------------------------------
+    // Watchdog (4 s tick) - prunes stale devices & triggers WiFi
+    // ---------------------------------------------------------------
+
     private val scanWatchdogRunnable = object : Runnable {
         override fun run() {
+            val now = System.currentTimeMillis()
+
+            // 7-second retention: remove devices not seen for > 7 s
+            if (!BleStore.isListFrozen) {
+                val iter = BleStore.devices.entries.iterator()
+                var removed = false
+                while (iter.hasNext()) {
+                    if (now - iter.next().value.lastSeenMs > 7000) {
+                        iter.remove()
+                        removed = true
+                    }
+                }
+                if (removed) uiDirty = true
+            }
+
+            // BLE watchdog restart
             if (isScannerActive && BleStore.shouldScan) {
-                val now = System.currentTimeMillis()
                 val staleFor = now - BleStore.lastPacketSeenMs
                 val restartedAgo = now - BleStore.lastScanRestartMs
-
                 if (BleStore.lastPacketSeenMs > 0L && staleFor > 12000L && restartedAgo > 5000L) {
                     restartScanSession("watchdog")
                 }
             }
+
+            // Trigger a WiFi scan each cycle
+            @Suppress("MissingPermission")
+            if (BleStore.shouldScan) {
+                try { wifiManager?.startScan() } catch (_: Exception) {}
+            }
+
             uiHandler.postDelayed(this, 4000)
         }
     }
+
+    // ---------------------------------------------------------------
+    // onCreate
+    // ---------------------------------------------------------------
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -196,14 +341,8 @@ class MainActivity : Activity() {
             setPadding(dp(18), dp(24), dp(18), dp(14))
             background = GradientDrawable(
                 GradientDrawable.Orientation.TOP_BOTTOM,
-                intArrayOf(
-                    0xFF2A0000.toInt(),
-                    0xFF140000.toInt(),
-                    0xFF000000.toInt()
-                )
-            ).apply {
-                setStroke(dp(1), 0xFFFF2200.toInt())
-            }
+                intArrayOf(0xFF2A0000.toInt(), 0xFF140000.toInt(), 0xFF000000.toInt())
+            ).apply { setStroke(dp(1), 0xFFFF2200.toInt()) }
         }
 
         val titleView = TextView(this).apply {
@@ -223,11 +362,11 @@ class MainActivity : Activity() {
             textSize = 10f
             typeface = Typeface.MONOSPACE
             setTextColor(0xFFFF4444.toInt())
-            setPadding(0, 0, 0, dp(8))
+            setPadding(0, 0, 0, dp(4))
         }
 
-        trackerLegendView = TextView(this).apply {
-            text = buildLegendText()
+        counterView = TextView(this).apply {
+            text = buildCounterText(0, 0, 0, 0, 0)
             gravity = Gravity.CENTER
             textSize = 10f
             typeface = Typeface.MONOSPACE
@@ -235,6 +374,7 @@ class MainActivity : Activity() {
         }
 
         vibrator = getSystemService(Vibrator::class.java)
+        wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
         toneGenerator = ToneGenerator(AudioManager.STREAM_NOTIFICATION, 100)
 
         val buttonBar = LinearLayout(this).apply {
@@ -261,36 +401,14 @@ class MainActivity : Activity() {
             updateButtonStates()
         }
 
-        buttonBar.addView(
-            startButton,
-            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-                marginEnd = dp(4)
-            }
-        )
-        buttonBar.addView(
-            stopButton,
-            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-                marginStart = dp(2)
-                marginEnd = dp(2)
-            }
-        )
-        buttonBar.addView(
-            vibrateButton,
-            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-                marginStart = dp(2)
-                marginEnd = dp(2)
-            }
-        )
-        buttonBar.addView(
-            soundButton,
-            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-                marginStart = dp(4)
-            }
-        )
+        buttonBar.addView(startButton, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(4) })
+        buttonBar.addView(stopButton, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = dp(2); marginEnd = dp(2) })
+        buttonBar.addView(vibrateButton, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = dp(2); marginEnd = dp(2) })
+        buttonBar.addView(soundButton, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = dp(4) })
 
         headerPanel.addView(titleView)
         headerPanel.addView(statusView)
-        headerPanel.addView(trackerLegendView)
+        headerPanel.addView(counterView)
         headerPanel.addView(buttonBar)
 
         adapter = DeviceListAdapter(this) { device -> openDetail(device.address) }
@@ -304,25 +422,22 @@ class MainActivity : Activity() {
 
         root.addView(headerPanel)
         root.addView(buildTableHeader())
-        root.addView(
-            listView,
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                0,
-                1f
-            )
-        )
+        root.addView(listView, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
 
         setContentView(root)
 
         if (ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) != PackageManager.PERMISSION_GRANTED ||
-            ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED
+            ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED ||
+            ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED
         ) {
             ActivityCompat.requestPermissions(
                 this,
                 arrayOf(
                     Manifest.permission.BLUETOOTH_SCAN,
-                    Manifest.permission.BLUETOOTH_CONNECT
+                    Manifest.permission.BLUETOOTH_CONNECT,
+                    Manifest.permission.ACCESS_FINE_LOCATION,
+                    Manifest.permission.ACCESS_WIFI_STATE,
+                    Manifest.permission.CHANGE_WIFI_STATE
                 ),
                 1
             )
@@ -330,6 +445,7 @@ class MainActivity : Activity() {
             initBle()
         }
 
+        registerReceiver(wifiScanReceiver, IntentFilter(WifiManager.SCAN_RESULTS_AVAILABLE_ACTION))
         uiHandler.post(uiRefreshRunnable)
         uiHandler.post(scanWatchdogRunnable)
         updateButtonStates()
@@ -343,6 +459,7 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         BleStore.shouldScan = isScannerActive
         super.onDestroy()
+        try { unregisterReceiver(wifiScanReceiver) } catch (_: Exception) {}
         uiHandler.removeCallbacks(uiRefreshRunnable)
         uiHandler.removeCallbacks(scanWatchdogRunnable)
         hardStopScanner()
@@ -350,11 +467,7 @@ class MainActivity : Activity() {
         toneGenerator = null
     }
 
-    override fun onRequestPermissionsResult(
-        requestCode: Int,
-        permissions: Array<out String>,
-        grantResults: IntArray
-    ) {
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == 1 && grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
             initBle()
@@ -364,9 +477,11 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun dp(value: Int): Int {
-        return (value * resources.displayMetrics.density).toInt()
-    }
+    // ---------------------------------------------------------------
+    // Helpers
+    // ---------------------------------------------------------------
+
+    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
     private fun buildHellButton(label: String): Button {
         return Button(this).apply {
@@ -377,10 +492,7 @@ class MainActivity : Activity() {
             setTextColor(0xFFFFF1E0.toInt())
             background = GradientDrawable(
                 GradientDrawable.Orientation.TOP_BOTTOM,
-                intArrayOf(
-                    0xFF6A0000.toInt(),
-                    0xFF260000.toInt()
-                )
+                intArrayOf(0xFF6A0000.toInt(), 0xFF260000.toInt())
             ).apply {
                 cornerRadius = dp(18).toFloat()
                 setStroke(dp(1), 0xFFFF4400.toInt())
@@ -389,39 +501,17 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun buildLegendText(): android.text.SpannableStringBuilder {
+    private fun buildCounterText(tracker: Int, gadget: Int, drone: Int, federal: Int, other: Int): android.text.SpannableStringBuilder {
         val sb = android.text.SpannableStringBuilder()
-
-        fun addPart(text: String, color: Int) {
-            val start = sb.length
+        fun colored(text: String, color: Int) {
+            val s = sb.length
             sb.append(text)
-            sb.setSpan(
-                android.text.style.ForegroundColorSpan(color),
-                start,
-                sb.length,
-                android.text.Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
-            )
+            sb.setSpan(android.text.style.ForegroundColorSpan(color), s, sb.length, android.text.Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
         }
-
-        addPart("[ TRACKER ]", 0xFFFFFF00.toInt())
-        addPart("=", 0xFFFFFFFF.toInt())
-        addPart("Yellow", 0xFFFFFF00.toInt())
-        addPart("  ", 0xFFFFFFFF.toInt())
-
-        addPart("[ GADGET ]", 0xFFFF8800.toInt())
-        addPart("=", 0xFFFFFFFF.toInt())
-        addPart("Orange", 0xFFFF8800.toInt())
-        sb.append("\n")
-
-        addPart("[ DRONE ]", 0xFFFF0000.toInt())
-        addPart("=", 0xFFFFFFFF.toInt())
-        addPart("Flash Red", 0xFFFF0000.toInt())
-        addPart("  ", 0xFFFFFFFF.toInt())
-
-        addPart("[ FEDERAL ]", 0xFF3F7BFF.toInt())
-        addPart("=", 0xFFFFFFFF.toInt())
-        addPart("Flash Red/Blue", 0xFF3F7BFF.toInt())
-
+        colored("[ TRACKER ]=$tracker  ", 0xFFFFFF00.toInt())
+        colored("[ GADGET ]=$gadget  ", 0xFFFF8800.toInt())
+        colored("[ DRONE ]=$drone  ", 0xFF8A2BE2.toInt())
+        colored("[ FEDERAL ]=$federal", 0xFF3F7BFF.toInt())
         return sb
     }
 
@@ -439,36 +529,19 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun setHellButtonState(button: Button, enabledState: Boolean) {
-        button.isEnabled = enabledState
-        button.alpha = if (enabledState) 1.0f else 0.38f
+    private fun setHellButtonState(button: Button, enabled: Boolean) {
+        button.isEnabled = enabled
+        button.alpha = if (enabled) 1.0f else 0.38f
     }
 
-    private var animationTick = 0
+    // ---------------------------------------------------------------
+    // Notifications - fires for ANY alert category
+    // ---------------------------------------------------------------
 
-    private fun isCyberGadgetClass(classText: String): Boolean {
-        return classText == "Flipper Zero" || classText == "Pwnagotchi" || classText == "Card Skimmer" || classText == "Dev Board"
-    }
-
-    private fun isDroneClass(classText: String): Boolean {
-        return classText == "Drone"
-    }
-
-    private fun isPoliceClass(classText: String): Boolean {
-        return classText == "Axon" || classText == "Flock"
-    }
-
-    private fun isTrackerClass(classText: String): Boolean {
-        return classText == "AirTag" ||
-            classText == "Tile" ||
-            classText == "Galaxy Tag" ||
-            classText == "Find My"
-    }
-
-    private fun notifyTrackerDetected() {
+    private fun notifyDeviceDetected() {
         val now = System.currentTimeMillis()
-        if (now - BleStore.lastTrackerNotifyMs < 3000) return
-        BleStore.lastTrackerNotifyMs = now
+        if (now - BleStore.lastNotifyMs < 3000) return
+        BleStore.lastNotifyMs = now
 
         if (BleStore.vibrateOnTracker) {
             vibrator?.let { v ->
@@ -494,10 +567,8 @@ class MainActivity : Activity() {
         val stopEnabled = isScannerActive && !BleStore.isListFrozen
         setHellButtonState(startButton, startEnabled)
         setHellButtonState(stopButton, stopEnabled)
-
         vibrateButton.text = "VIBRATE"
         vibrateButton.alpha = if (BleStore.vibrateOnTracker) 1.0f else 0.55f
-
         soundButton.text = "SOUND"
         soundButton.alpha = if (BleStore.soundOnTracker) 1.0f else 0.55f
     }
@@ -507,7 +578,6 @@ class MainActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             setBackgroundColor(0xFF1A1A1A.toInt())
             setPadding(dp(8), dp(4), dp(8), dp(4))
-
             addView(buildHeaderCell("RSSI", 0.9f))
             addView(buildHeaderCell("MAC", 3.0f))
             addView(buildHeaderCell("MFG", 1.3f))
@@ -515,53 +585,34 @@ class MainActivity : Activity() {
         }
     }
 
+    // ---------------------------------------------------------------
+    // BLE scan management
+    // ---------------------------------------------------------------
+
     private fun restartScanSession(reason: String) {
-        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) != PackageManager.PERMISSION_GRANTED) {
-            return
-        }
-
-        try {
-            scanner?.stopScan(scanCallback)
-        } catch (_: Exception) {
-        }
-
-        val settings = ScanSettings.Builder()
-            .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
-            .build()
-
+        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) != PackageManager.PERMISSION_GRANTED) return
+        try { scanner?.stopScan(scanCallback) } catch (_: Exception) {}
+        val settings = ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build()
         try {
             scanner?.startScan(null, settings, scanCallback)
             isScannerActive = true
             BleStore.shouldScan = true
             BleStore.lastScanRestartMs = System.currentTimeMillis()
             statusView.text = "TAP ANY DEVICE ROW TO VIEW DETAILS"
-        } catch (_: Exception) {
-        }
-
+        } catch (_: Exception) {}
         updateButtonStates()
     }
 
     private fun initBle() {
         val adapter = BluetoothAdapter.getDefaultAdapter()
-        if (adapter == null) {
+        if (adapter == null || !adapter.isEnabled) {
             statusView.text = "TAP ANY DEVICE ROW TO VIEW DETAILS"
             updateButtonStates()
             return
         }
-
-        if (!adapter.isEnabled) {
-            statusView.text = "TAP ANY DEVICE ROW TO VIEW DETAILS"
-            updateButtonStates()
-            return
-        }
-
         scanner = adapter.bluetoothLeScanner
-
         if (BleStore.shouldScan) {
-            val settings = ScanSettings.Builder()
-                .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
-                .build()
-
+            val settings = ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build()
             if (ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED) {
                 scanner?.startScan(null, settings, scanCallback)
                 isScannerActive = true
@@ -569,31 +620,20 @@ class MainActivity : Activity() {
                 BleStore.lastPacketSeenMs = System.currentTimeMillis()
             }
         }
-
         statusView.text = "TAP ANY DEVICE ROW TO VIEW DETAILS"
         updateButtonStates()
     }
 
     private fun startScan() {
         BleStore.isListFrozen = false
-
         if (isScannerActive) {
-            statusView.text = "TAP ANY DEVICE ROW TO VIEW DETAILS"
             BleStore.shouldScan = true
             renderDeviceList()
             updateButtonStates()
             return
         }
-
-        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) != PackageManager.PERMISSION_GRANTED) {
-            statusView.text = "TAP ANY DEVICE ROW TO VIEW DETAILS"
-            return
-        }
-
-        val settings = ScanSettings.Builder()
-            .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
-            .build()
-
+        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) != PackageManager.PERMISSION_GRANTED) return
+        val settings = ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build()
         scanner?.startScan(null, settings, scanCallback)
         isScannerActive = true
         BleStore.shouldScan = true
@@ -605,11 +645,9 @@ class MainActivity : Activity() {
 
     private fun lockList() {
         if (!isScannerActive) {
-            statusView.text = "TAP ANY DEVICE ROW TO VIEW DETAILS"
             updateButtonStates()
             return
         }
-
         BleStore.isListFrozen = true
         BleStore.shouldScan = true
         statusView.text = "TAP ANY DEVICE ROW TO VIEW DETAILS"
@@ -627,10 +665,12 @@ class MainActivity : Activity() {
     }
 
     private fun openDetail(address: String) {
-        val intent = Intent(this, DetailActivity::class.java)
-        intent.putExtra("address", address)
-        startActivity(intent)
+        startActivity(Intent(this, DetailActivity::class.java).putExtra("address", address))
     }
+
+    // ---------------------------------------------------------------
+    // BLE scan callback
+    // ---------------------------------------------------------------
 
     private val scanCallback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
@@ -649,11 +689,8 @@ class MainActivity : Activity() {
             val existing = BleStore.devices[addr]
             if (existing == null) {
                 BleStore.devices[addr] = BleSeenDevice(
-                    name = name,
-                    address = addr,
-                    rssi = rssi,
-                    packetCount = 1,
-                    lastSeenMs = now,
+                    name = name, address = addr, rssi = rssi,
+                    packetCount = 1, lastSeenMs = now,
                     manufacturerText = manufacturerText,
                     manufacturerDataText = manufacturerDataText,
                     serviceUuidsText = serviceUuidsText,
@@ -670,41 +707,83 @@ class MainActivity : Activity() {
                 existing.rawAdvText = rawAdvText
             }
 
-            val classText = classifyDevice(BleStore.devices[addr]!!)
-            if (isTrackerClass(classText)) {
-                BleStore.trackerSeenThisSession = true
-                notifyTrackerDetected()
+            // Extract Drone Remote ID coordinates (ODID via UUID 0xFFFA)
+            if (record != null) {
+                val serviceData = record.serviceData
+                if (serviceData != null) {
+                    for ((uuid, data) in serviceData) {
+                        if (uuid.toString().uppercase().contains("FFFA") && data.isNotEmpty()) {
+                            val msgType = (data[0].toInt() and 0xF0) shr 4
+                            if (msgType == 1 && data.size >= 13) {
+                                val latInt = (data[5].toInt() and 0xFF) or
+                                        ((data[6].toInt() and 0xFF) shl 8) or
+                                        ((data[7].toInt() and 0xFF) shl 16) or
+                                        ((data[8].toInt() and 0xFF) shl 24)
+                                val lonInt = (data[9].toInt() and 0xFF) or
+                                        ((data[10].toInt() and 0xFF) shl 8) or
+                                        ((data[11].toInt() and 0xFF) shl 16) or
+                                        ((data[12].toInt() and 0xFF) shl 24)
+                                val lat = latInt / 10000000.0
+                                val lon = lonInt / 10000000.0
+                                if (lat != 0.0 && lon != 0.0) {
+                                    BleStore.devices[addr]?.droneLat = lat
+                                    BleStore.devices[addr]?.droneLon = lon
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
-            if (!BleStore.isListFrozen) {
-                uiDirty = true
+            val classText = classifyDevice(BleStore.devices[addr]!!)
+            if (isAlertCategory(classText)) {
+                BleStore.trackerSeenThisSession = true
+                notifyDeviceDetected()
             }
+
+            if (!BleStore.isListFrozen) uiDirty = true
         }
     }
 
+    // ---------------------------------------------------------------
+    // Render
+    // ---------------------------------------------------------------
+
     private fun renderDeviceList() {
         val sorted = BleStore.devices.values.sortedWith(
-            compareByDescending<BleSeenDevice> { it.rssi }
-                .thenByDescending { it.lastSeenMs }
+            compareByDescending<BleSeenDevice> { it.rssi }.thenByDescending { it.lastSeenMs }
         )
 
+        var trackerCount = 0; var gadgetCount = 0; var droneCount = 0; var federalCount = 0; var otherCount = 0
+        for (d in sorted) {
+            val c = classifyDevice(d)
+            when {
+                isTrackerClass(c) -> trackerCount++
+                isCyberGadgetClass(c) -> gadgetCount++
+                isDroneClass(c) -> droneCount++
+                isPoliceClass(c) -> federalCount++
+                else -> otherCount++
+            }
+        }
+        BleStore.dronePresent = droneCount > 0
+
         statusView.text = "TAP ANY DEVICE ROW TO VIEW DETAILS"
-        trackerLegendView.text = buildLegendText()
+        counterView.text = buildCounterText(trackerCount, gadgetCount, droneCount, federalCount, otherCount)
 
         adapter.replaceData(sorted.take(250))
         updateButtonStates()
     }
 
+    // ---------------------------------------------------------------
+    // BLE record helpers
+    // ---------------------------------------------------------------
+
     private fun detectManufacturer(record: ScanRecord?): String {
         if (record == null) return "-"
         val data = record.manufacturerSpecificData ?: return "-"
         if (data.size() == 0) return "-"
-
         val ids = mutableListOf<Int>()
-        for (i in 0 until data.size()) {
-            ids.add(data.keyAt(i))
-        }
-
+        for (i in 0 until data.size()) ids.add(data.keyAt(i))
         return when {
             ids.contains(0x004C) -> "APPLE"
             ids.contains(0x0006) -> "MSFT"
@@ -719,7 +798,6 @@ class MainActivity : Activity() {
         if (record == null) return "-"
         val data = record.manufacturerSpecificData ?: return "-"
         if (data.size() == 0) return "-"
-
         val parts = mutableListOf<String>()
         for (i in 0 until data.size()) {
             val id = data.keyAt(i)
@@ -743,25 +821,29 @@ class MainActivity : Activity() {
     }
 }
 
+// ===================================================================
+// OutlinedTextView
+// ===================================================================
 
 class OutlinedTextView(context: android.content.Context) : AppCompatTextView(context) {
     var strokeColor: Int = 0xFF000000.toInt()
     var strokeWidthPx: Float = 4f
 
     override fun onDraw(canvas: Canvas) {
-        val originalColors = currentTextColor
-
+        val orig = currentTextColor
         paint.style = Paint.Style.STROKE
         paint.strokeWidth = strokeWidthPx
         setTextColor(strokeColor)
         super.onDraw(canvas)
-
         paint.style = Paint.Style.FILL
-        setTextColor(originalColors)
+        setTextColor(orig)
         super.onDraw(canvas)
     }
 }
 
+// ===================================================================
+// DeviceListAdapter
+// ===================================================================
 
 class DeviceListAdapter(
     private val activity: Activity,
@@ -770,13 +852,11 @@ class DeviceListAdapter(
 
     private val items = mutableListOf<BleSeenDevice>()
 
-    private fun dp(value: Int): Int {
-        return (value * activity.resources.displayMetrics.density).toInt()
-    }
+    private fun dp(v: Int) = (v * activity.resources.displayMetrics.density).toInt()
 
     private fun nameCharLimit(): Int {
-        val isLandscape = activity.resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
-        return if (isLandscape) 32 else 22
+        val landscape = activity.resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
+        return if (landscape) 32 else 22
     }
 
     fun replaceData(newItems: List<BleSeenDevice>) {
@@ -785,9 +865,9 @@ class DeviceListAdapter(
         notifyDataSetChanged()
     }
 
-    override fun getCount(): Int = items.size
-    override fun getItem(position: Int): BleSeenDevice = items[position]
-    override fun getItemId(position: Int): Long = position.toLong()
+    override fun getCount() = items.size
+    override fun getItem(pos: Int) = items[pos]
+    override fun getItemId(pos: Int) = pos.toLong()
 
     private fun buildCell(text: String, weight: Float): TextView {
         return TextView(activity).apply {
@@ -807,15 +887,11 @@ class DeviceListAdapter(
         val item = getItem(position)
         val rowBg = if (position % 2 == 0) 0xFF8F0A0A.toInt() else 0xFF050505.toInt()
         val classText = classifyDevice(item)
-        val isTrackerRow =
-            classText == "AirTag" ||
-            classText == "Tile" ||
-            classText == "Galaxy Tag" ||
-            classText == "Find My"
 
-        val isCyberGadget = classText == "Flipper Zero" || classText == "Pwnagotchi" || classText == "Card Skimmer" || classText == "Dev Board"
-        val isDrone = classText == "Drone"
-        val isPolice = classText == "Axon" || classText == "Flock"
+        val isTracker = isTrackerClass(classText)
+        val isCyber = isCyberGadgetClass(classText)
+        val isDrone = isDroneClass(classText)
+        val isPolice = isPoliceClass(classText)
         val tick = (activity as? MainActivity)?.getAnimationTick() ?: 0
 
         val container = LinearLayout(activity).apply {
@@ -824,14 +900,11 @@ class DeviceListAdapter(
             background = GradientDrawable().apply {
                 shape = GradientDrawable.RECTANGLE
                 setColor(rowBg)
-                if (isTrackerRow) {
-                    setStroke(dp(2), 0xFFFFFF00.toInt())
-                } else if (isCyberGadget) {
-                    setStroke(dp(2), 0xFFFF8800.toInt())
-                } else if (isDrone) {
-                    if (tick == 0) setStroke(dp(2), 0xFFFF0000.toInt()) else setStroke(dp(2), 0xFF440000.toInt())
-                } else if (isPolice) {
-                    if (tick == 0) setStroke(dp(2), 0xFFFF0000.toInt()) else setStroke(dp(2), 0xFF0000FF.toInt())
+                when {
+                    isTracker -> setStroke(dp(2), 0xFFFFFF00.toInt())
+                    isCyber   -> setStroke(dp(2), 0xFFFF8800.toInt())
+                    isDrone   -> setStroke(dp(2), 0xFF8A2BE2.toInt())          // solid violet
+                    isPolice  -> if (tick == 0) setStroke(dp(2), 0xFFFF0000.toInt()) else setStroke(dp(2), 0xFF0000FF.toInt())
                 }
             }
         }
@@ -847,36 +920,28 @@ class DeviceListAdapter(
             setBackgroundColor(rowBg)
         }
 
-        val clippedMfg = if (item.manufacturerText.length > 6) item.manufacturerText.take(6) else item.manufacturerText
-        val clippedName = item.name.replace("\n", " ").let {
-            if (it.length > nameCharLimit()) it.take(nameCharLimit()) else it
-        }
+        val clippedMfg = item.manufacturerText.take(6)
+        val clippedName = item.name.replace("\n", " ").take(nameCharLimit())
 
         topRow.addView(buildCell(item.rssi.toString(), 0.9f))
         topRow.addView(buildCell(item.address, 3.0f))
         topRow.addView(buildCell(clippedMfg, 1.3f))
-        val isTrackerClass =
-            classText == "AirTag" ||
-            classText == "Tile" ||
-            classText == "Galaxy Tag" ||
-            classText == "Find My"
 
-        val classView = if (isTrackerClass || isCyberGadget || isDrone || isPolice) {
+        val classView = if (isTracker || isCyber || isDrone || isPolice) {
             val bracketText = when {
-                isTrackerClass -> "[ TRACKER ]"
-                isCyberGadget -> "[ GADGET ]"
-                isDrone -> "[ DRONE ]"
-                isPolice -> "[ FEDERAL ]"
-                else -> classText
+                isTracker -> "[ TRACKER ]"
+                isCyber   -> "[ GADGET ]"
+                isDrone   -> "[ DRONE ]"
+                isPolice  -> "[ FEDERAL ]"
+                else      -> classText
             }
             val textColor = when {
-                isTrackerClass -> 0xFFFF8800.toInt()
-                isCyberGadget -> 0xFFFF8800.toInt()
-                isDrone -> if (tick == 0) 0xFFFF0000.toInt() else 0xFF880000.toInt()
-                isPolice -> if (tick == 0) 0xFFFF0000.toInt() else 0xFF0000FF.toInt()
-                else -> 0xFFFFFFFF.toInt()
+                isTracker -> 0xFFFF8800.toInt()
+                isCyber   -> 0xFFFF8800.toInt()
+                isDrone   -> 0xFF8A2BE2.toInt()                               // solid violet
+                isPolice  -> if (tick == 0) 0xFFFF0000.toInt() else 0xFF0000FF.toInt()
+                else      -> 0xFFFFFFFF.toInt()
             }
-
             OutlinedTextView(activity).apply {
                 text = bracketText
                 typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
@@ -897,13 +962,8 @@ class DeviceListAdapter(
         topRow.addView(classView)
 
         val nameBox = TextView(activity).apply {
-            text = android.text.SpannableString("NAME: " + clippedName).apply {
-                setSpan(
-                    android.text.style.ForegroundColorSpan(0xFF80FF80.toInt()),
-                    0,
-                    5,
-                    android.text.Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
-                )
+            text = android.text.SpannableString("NAME: $clippedName").apply {
+                setSpan(android.text.style.ForegroundColorSpan(0xFF80FF80.toInt()), 0, 5, android.text.Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
             }
             typeface = Typeface.MONOSPACE
             textSize = 11f
@@ -918,22 +978,16 @@ class DeviceListAdapter(
                 setColor(0xFF303030.toInt())
                 setStroke(dp(1), 0xFF555555.toInt())
             }
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply {
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
                 topMargin = dp(2)
                 bottomMargin = dp(6)
             }
         }
 
         bottomRow.addView(nameBox)
-
         container.addView(topRow)
         container.addView(bottomRow)
-
         container.setOnClickListener { onDetailsClick(item) }
-
         return container
     }
 }
