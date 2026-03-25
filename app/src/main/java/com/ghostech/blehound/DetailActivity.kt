@@ -17,21 +17,151 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+import android.bluetooth.*
+import android.bluetooth.le.*
+
+
 class DetailActivity : Activity() {
 
     private lateinit var rssiView: TextView
     private lateinit var summaryView: TextView
     private lateinit var detailsView: TextView
+
+    private lateinit var gattView: TextView
+    private var gattData: String = ""
+
+    private var bluetoothGatt: BluetoothGatt? = null
+
+    private val gattCallback = object : BluetoothGattCallback() {
+
+        override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+            if (newState == BluetoothProfile.STATE_CONNECTED) {
+                runOnUiThread { gattView.text = "GATT CONNECTED - DISCOVERING SERVICES..." }
+                
+gatt.requestMtu(517)
+gatt.discoverServices()
+
+            } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                runOnUiThread { gattData += "\n[STATUS] GATT DISCONNECTED\n"
+                runOnUiThread { gattView.text = gattData } }
+                bluetoothGatt?.close()
+                bluetoothGatt = null
+            }
+        }
+
+        
+        override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
+            gattData += "\nMTU NEGOTIATED: $mtu\n"
+        }
+
+        override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+            val sb = StringBuilder()
+            sb.append("\n================ GATT PROFILE ================\n\n")
+
+            for (service in gatt.services) {
+                val sUuid = service.uuid.toString()
+                val sName = uuidName(sUuid)
+                sb.append("\n[SERVICE]\n")
+                sb.append("UUID        : ").append(sUuid)
+                if (sName.isNotEmpty()) sb.append(" [").append(sName).append("]")
+                sb.append("--------------------------------\n")
+
+                for (ch in service.characteristics) {
+                    val cUuid = ch.uuid.toString()
+                    val cName = uuidName(cUuid)
+                    sb.append("  ├─ CHARACTERISTIC\n")
+                    sb.append("     UUID        : ").append(cUuid)
+                    if (cName.isNotEmpty()) sb.append(" [").append(cName).append("]")
+
+                    if ((ch.properties and BluetoothGattCharacteristic.PROPERTY_READ) != 0) {
+                        gatt.readCharacteristic(ch)
+                    }
+
+                    if ((ch.properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY) != 0) {
+                        gatt.setCharacteristicNotification(ch, true)
+                        for (desc in ch.descriptors) {
+                            desc.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                            gatt.writeDescriptor(desc)
+                        }
+                        sb.append(" [NOTIFY ENABLED]")
+                    }
+
+                    for (desc in ch.descriptors) {
+                        gatt.readDescriptor(desc)
+                    }
+
+                    sb.append("--------------------------------\n")
+                }
+
+                sb.append("--------------------------------\n")
+            }
+
+            gattData = if (sb.isNotEmpty()) sb.toString() else gattData
+
+            runOnUiThread {
+                gattView.text = gattData
+            }
+        }
+
+        
+        
+        override fun onDescriptorRead(
+            gatt: BluetoothGatt,
+            descriptor: BluetoothGattDescriptor,
+            status: Int
+        ) {
+            val pretty = bytesToPretty(descriptor.value)
+            val dUuid = descriptor.uuid.toString()
+            val dName = uuidName(dUuid)
+            gattData += "    DESC: " + dUuid +
+                (if (dName.isNotEmpty()) " [" + dName + "]" else "") +
+                " = " + pretty + "\n"
+        }
+
+        override fun onCharacteristicChanged(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic
+        ) {
+            val pretty = bytesToPretty(characteristic.value)
+            gattData += "    NOTIFY: ${characteristic.uuid} = $pretty\n"
+
+            runOnUiThread {
+                gattView.text = gattData
+            }
+        }
+
+        override fun onCharacteristicRead(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            status: Int
+        ) {
+            val value = characteristic.value
+            val pretty = bytesToPretty(value)
+
+            gattData += "     VALUE\n"
+            gattData += "       UUID  : ${characteristic.uuid}\n"
+            gattData += "       DATA  : $pretty\n"
+
+            runOnUiThread {
+                gattView.text = gattData
+            }
+        }
+    }
+
+
     private var pendingSaveText: String = ""
     private var pendingSaveName: String = "SIGNAL-LOG-0001.txt"
 
     private val handler = Handler(Looper.getMainLooper())
     private var address: String? = null
 
+    private var cachedDevice: BleSeenDevice? = null
+
+
     private val refresher = object : Runnable {
         override fun run() {
             render()
-            handler.postDelayed(this, 500)
+            handler.postDelayed(this, 1500)
         }
     }
 
@@ -39,6 +169,11 @@ class DetailActivity : Activity() {
         super.onCreate(savedInstanceState)
 
         address = intent.getStringExtra("address")
+        val initial = BleStore.devices[address]
+        if (initial != null) {
+            cachedDevice = initial.copy()
+        }
+
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -96,6 +231,26 @@ class DetailActivity : Activity() {
         headerPanel.addView(rssiView)
         headerPanel.addView(summaryView)
         headerPanel.addView(saveButton)
+        val gattButton = Button(this).apply {
+            text = "READ GATT"
+            setOnClickListener { readGatt() }
+        }
+
+        gattView = TextView(this).apply {
+            setBackgroundColor(0xFF050505.toInt())
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+            setLineSpacing(2f, 1.1f)
+
+            textSize = 12f
+            typeface = Typeface.MONOSPACE
+            setTextColor(0xFF66CCFF.toInt())
+            setPadding(dp(16), dp(8), dp(16), dp(8))
+            text = "GATT DATA: (not loaded)"
+        }
+
+        headerPanel.addView(gattButton)
+        
+
 
         detailsView = TextView(this).apply {
             textSize = 13f
@@ -105,9 +260,15 @@ class DetailActivity : Activity() {
             setPadding(dp(16), dp(16), dp(16), dp(16))
         }
 
+        val scrollContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(detailsView)
+            addView(gattView)
+        }
+
         val scroll = ScrollView(this).apply {
             setBackgroundColor(0xFF000000.toInt())
-            addView(detailsView)
+            addView(scrollContainer)
         }
 
         root.addView(headerPanel)
@@ -131,6 +292,8 @@ class DetailActivity : Activity() {
     override fun onPause() {
         super.onPause()
         handler.removeCallbacks(refresher)
+        bluetoothGatt?.close()
+        bluetoothGatt = null
     }
 
     private fun nowStamp(): String {
@@ -215,6 +378,16 @@ class DetailActivity : Activity() {
             append("\nRAW ADVERTISEMENT\n")
             append("-----------------\n")
             append("${d.rawAdvText}\n")
+
+            append("\nGATT DATA\n")
+            append("---------\n")
+            append(if (gattData.isBlank()) "Not collected" else gattData)
+
+
+            append("\nGATT DATA\n")
+            append("---------\n")
+            append(if (gattData.isBlank()) "Not collected" else gattData)
+
         }
     }
 
@@ -265,14 +438,60 @@ class DetailActivity : Activity() {
         }
     }
 
+    
+    
+    
+    private fun uuidName(uuid: String): String {
+        val u = uuid.lowercase()
+        return when {
+            u.contains("180f") -> "Battery Service"
+            u.contains("2a19") -> "Battery Level"
+            u.contains("180d") -> "Heart Rate Service"
+            u.contains("2a37") -> "Heart Rate Measurement"
+            u.contains("180a") -> "Device Information"
+            u.contains("2a29") -> "Manufacturer Name"
+            u.contains("2a24") -> "Model Number"
+            u.contains("2a25") -> "Serial Number"
+            u.contains("2a27") -> "Hardware Revision"
+            u.contains("2a26") -> "Firmware Revision"
+            u.contains("2a28") -> "Software Revision"
+            u.contains("2902") -> "Client Characteristic Config"
+            else -> ""
+        }
+    }
+
+    private fun bytesToPretty(value: ByteArray?): String {
+        if (value == null) return "null"
+
+        val hex = value.joinToString(" ") { "%02X".format(it) }
+        val ascii = value.map {
+            if (it in 32..126) it.toInt().toChar() else '.'
+        }.joinToString("")
+
+        return "HEX[$hex] ASCII[$ascii]"
+    }
+
+    private fun readGatt() {
+        val addr = address ?: return
+
+        val adapter = BluetoothAdapter.getDefaultAdapter() ?: return
+        val device = adapter.getRemoteDevice(addr) ?: return
+
+        gattData = "CONNECTING TO " + addr
+        gattView.text = gattData
+
+        bluetoothGatt?.close()
+        bluetoothGatt = device.connectGatt(this, false, gattCallback)
+    }
+
     private fun render() {
         val addr = address ?: return
         val d = BleStore.devices[addr]
 
         if (d == null) {
             rssiView.text = "-- dBm"
-            summaryView.text = "Device not found"
-            detailsView.text = "No cached device found for:\n$addr"
+            
+            
             return
         }
 
@@ -282,7 +501,7 @@ class DetailActivity : Activity() {
             else -> String.format("%.1fs", ageMs / 1000.0)
         }
 
-        rssiView.text = "${d.rssi} dBm"
+        rssiView.text = if (d.rssi != 0) "${d.rssi} dBm" else rssiView.text
         val deviceClass = classifyDevice(d)
         val description = getDeviceDescription(deviceClass)
 
@@ -300,7 +519,7 @@ class DetailActivity : Activity() {
                 append("DRONE LAT      : ${d.droneLat}\n")
                 append("DRONE LON      : ${d.droneLon}\n")
             }
-            append("LIVE RSSI      : ${d.rssi}\n")
+            append("RSSI      : ${d.rssi}\n")
             append("PACKETS SEEN   : ${d.packetCount}\n")
             append("AGE            : $ageText\n")
             append("MANUFACTURER   : ${d.manufacturerText}\n\n")

@@ -53,6 +53,10 @@ data class BleSeenDevice(
     var manufacturerText: String,
     var manufacturerDataText: String,
     var serviceUuidsText: String,
+    var serviceDataText: String,
+    var flagsText: String,
+    var txPowerText: String,
+    var appearanceText: String,
     var rawAdvText: String,
     var isWifi: Boolean = false,
     var droneLat: Double? = null,
@@ -300,6 +304,10 @@ class MainActivity : Activity() {
                     manufacturerText = "WIFI",
                     manufacturerDataText = if (r.capabilities.isNullOrBlank()) "-" else r.capabilities,
                     serviceUuidsText = "FREQ=${r.frequency}",
+                    serviceDataText = "-",
+                    flagsText = "-",
+                    txPowerText = "-",
+                    appearanceText = "-",
                     rawAdvText = "SSID=${if (ssid.isEmpty()) "<hidden>" else ssid}",
                     isWifi = true
                 )
@@ -311,6 +319,10 @@ class MainActivity : Activity() {
                 existing.manufacturerText = "WIFI"
                 existing.manufacturerDataText = if (r.capabilities.isNullOrBlank()) "-" else r.capabilities
                 existing.serviceUuidsText = "FREQ=${r.frequency}"
+                existing.serviceDataText = "-"
+                existing.flagsText = "-"
+                existing.txPowerText = "-"
+                existing.appearanceText = "-"
                 existing.rawAdvText = "SSID=${if (ssid.isEmpty()) "<hidden>" else ssid}"
             }
 
@@ -932,6 +944,10 @@ class MainActivity : Activity() {
             val manufacturerText = detectManufacturer(record)
             val manufacturerDataText = formatManufacturerData(record)
             val serviceUuidsText = formatServiceUuids(record)
+            val serviceDataText = formatServiceData(record)
+            val flagsText = formatFlags(record)
+            val txPowerText = formatTxPower(record)
+            val appearanceText = formatAppearance(record)
             val rawAdvText = formatRawAdv(record)
 
             val existing = BleStore.devices[addr]
@@ -942,6 +958,10 @@ class MainActivity : Activity() {
                     manufacturerText = manufacturerText,
                     manufacturerDataText = manufacturerDataText,
                     serviceUuidsText = serviceUuidsText,
+                    serviceDataText = serviceDataText,
+                    flagsText = flagsText,
+                    txPowerText = txPowerText,
+                    appearanceText = appearanceText,
                     rawAdvText = rawAdvText
                 )
             } else {
@@ -952,6 +972,10 @@ class MainActivity : Activity() {
                 existing.manufacturerText = manufacturerText
                 existing.manufacturerDataText = manufacturerDataText
                 existing.serviceUuidsText = serviceUuidsText
+                existing.serviceDataText = serviceDataText
+                existing.flagsText = flagsText
+                existing.txPowerText = txPowerText
+                existing.appearanceText = appearanceText
                 existing.rawAdvText = rawAdvText
             }
 
@@ -1041,6 +1065,53 @@ class MainActivity : Activity() {
             ids.contains(0x09C8) -> "XUNTONG"
             else -> String.format("%04X", ids.first())
         }
+    }
+
+    private fun formatServiceData(record: ScanRecord?): String {
+        if (record == null) return "-"
+        val out = mutableListOf<String>()
+        val sd = record.serviceData ?: return "-"
+        for ((uuid, data) in sd) {
+            val hex = data.joinToString(" ") { "%02X".format(it) }
+            out.add("${uuid}: [$hex]")
+        }
+        return if (out.isEmpty()) "-" else out.joinToString(" | ")
+    }
+
+    private fun formatFlags(record: ScanRecord?): String {
+        val bytes = record?.bytes ?: return "-"
+        if (bytes.size < 3) return "-"
+        var i = 0
+        while (i < bytes.size) {
+            val len = bytes[i].toInt() and 0xFF
+            if (len == 0 || i + len >= bytes.size + 1) break
+            val type = bytes[i + 1].toInt() and 0xFF
+            if (type == 0x01 && len >= 2) return "0x%02X".format(bytes[i + 2].toInt() and 0xFF)
+            i += len + 1
+        }
+        return "-"
+    }
+
+    private fun formatTxPower(record: ScanRecord?): String {
+        val v = record?.txPowerLevel ?: Int.MIN_VALUE
+        return if (v == Int.MIN_VALUE) "-" else "${v} dBm"
+    }
+
+    private fun formatAppearance(record: ScanRecord?): String {
+        val bytes = record?.bytes ?: return "-"
+        var i = 0
+        while (i < bytes.size) {
+            val len = bytes[i].toInt() and 0xFF
+            if (len == 0 || i + len >= bytes.size + 1) break
+            val type = bytes[i + 1].toInt() and 0xFF
+            if (type == 0x19 && len >= 3) {
+                val lo = bytes[i + 2].toInt() and 0xFF
+                val hi = bytes[i + 3].toInt() and 0xFF
+                return "0x%04X".format((hi shl 8) or lo)
+            }
+            i += len + 1
+        }
+        return "-"
     }
 
     private fun formatManufacturerData(record: ScanRecord?): String {
