@@ -81,6 +81,56 @@ object BleStore {
 // Classification
 // ---------------------------------------------------------------------------
 
+fun isExactPwnagotchiWifi(bssid: String): Boolean {
+    return bssid == "de:ad:be:ef:de:ad"
+}
+
+fun isLikelyPwnagotchiWifi(ssid: String, bssid: String): Boolean {
+    return bssid == "de:ad:be:ef:de:ad" ||
+            bssid.startsWith("de:ad:be") ||
+            ssid.contains("pwnagotchi") ||
+            ssid.contains("bettercap") ||
+            ssid.contains("pwngrid")
+}
+
+fun isLikelyWifiPineapple(ssid: String, bssid: String): Boolean {
+    return ssid.contains("pineapple") ||
+            ssid.contains("pineap") ||
+            ssid.contains("openap") ||
+            ssid.contains("evilportal") ||
+            ssid.contains("hak5") ||
+            (bssid.length >= 8 && bssid.substring(3, 5) == "13" && bssid.substring(6, 8) == "37")
+}
+
+fun isExactBleDrone(d: BleSeenDevice): Boolean {
+    val name = d.name.uppercase()
+    val raw = d.rawAdvText.uppercase()
+    val svc = d.serviceUuidsText.uppercase()
+    return (d.droneLat != null && d.droneLon != null) ||
+            raw.contains("16 FA FF 0D") ||
+            raw.replace(" ", "").contains("16FAFF0D") ||
+            svc.contains("FFFA") ||
+            name.contains("DJI") ||
+            name.contains("PARROT") ||
+            name.contains("SKYDIO") ||
+            name.contains("AUTEL") ||
+            name.contains("ANAFI")
+}
+
+fun isLikelyWifiDrone(ssid: String): Boolean {
+    return ssid.contains("dji") ||
+            ssid.contains("parrot") ||
+            ssid.contains("skydio") ||
+            ssid.contains("autel") ||
+            ssid.contains("anafi") ||
+            ssid.contains("drone") ||
+            ssid.contains("uav") ||
+            ssid.contains("uas") ||
+            ssid.contains("remoteid") ||
+            ssid.contains("remote-id") ||
+            ssid.contains("opendroneid")
+}
+
 fun classifyDevice(d: BleSeenDevice): String {
     val name = d.name.lowercase()
     val mfg = d.manufacturerText.uppercase()
@@ -90,12 +140,12 @@ fun classifyDevice(d: BleSeenDevice): String {
 
     // --- WiFi-detected devices (from WiFi scan) ---
     if (d.isWifi) {
-        if (name.contains("pwnagotchi") || d.address.lowercase().startsWith("de:ad:be")) return "Pwnagotchi"
-        if (name.contains("flipper")) return "Flipper Zero"
-        if (name.contains("dji") || name.contains("parrot") || name.contains("skydio") || name.contains("autel")) return "Drone"
-        // WiFi Pineapple OUI: xx:13:37:xx:xx:xx
         val bssid = d.address.lowercase()
-        if (bssid.length >= 8 && bssid.substring(3, 5) == "13" && bssid.substring(6, 8) == "37") return "WiFi Pineapple"
+        if (isExactPwnagotchiWifi(bssid)) return "Pwnagotchi"
+        if (isLikelyPwnagotchiWifi(name, bssid)) return "Pwnagotchi"
+        if (name.contains("flipper")) return "Flipper Zero"
+        if (isLikelyWifiDrone(name)) return "Drone"
+        if (isLikelyWifiPineapple(name, bssid)) return "WiFi Pineapple"
         return "WiFi Device"
     }
 
@@ -147,7 +197,7 @@ fun classifyDevice(d: BleSeenDevice): String {
     }
 
     // Drone (Remote ID / known manufacturers)
-    if ("DJI" in name || "PARROT" in name || "SKYDIO" in name || "AUTEL" in name || "FFFA" in svc) {
+    if (isExactBleDrone(d) || "DJI" in name || "PARROT" in name || "SKYDIO" in name || "AUTEL" in name) {
         return "Drone"
     }
 
@@ -163,7 +213,8 @@ fun classifyDevice(d: BleSeenDevice): String {
         "70:c9:4e", "3c:91:80", "d8:f3:bc", "80:30:49", "14:5a:fc",
         "74:4c:a1", "08:3a:88", "9c:2f:9d", "94:08:53", "e4:aa:ea"
     )
-    if ("FS EXT BATTERY" in name || "PENGUIN" in name || "FLOCK" in name || "PIGVISION" in name || flockPrefixes.contains(macPrefix)) {
+    if ("FS EXT BATTERY" in name || "PENGUIN" in name || "FLOCK" in name || "PIGVISION" in name ||
+        mfg == "XUNTONG" || mfgData.contains("09C8") || flockPrefixes.contains(macPrefix)) {
         return "Flock"
     }
     // --- End nyanBOX Ported Logic ---
@@ -247,9 +298,9 @@ class MainActivity : Activity() {
                     packetCount = 1,
                     lastSeenMs = now,
                     manufacturerText = "WIFI",
-                    manufacturerDataText = "-",
-                    serviceUuidsText = "-",
-                    rawAdvText = "-",
+                    manufacturerDataText = if (r.capabilities.isNullOrBlank()) "-" else r.capabilities,
+                    serviceUuidsText = "FREQ=${r.frequency}",
+                    rawAdvText = "SSID=${if (ssid.isEmpty()) "<hidden>" else ssid}",
                     isWifi = true
                 )
             } else {
@@ -257,6 +308,10 @@ class MainActivity : Activity() {
                 existing.rssi = rssi
                 existing.packetCount += 1
                 existing.lastSeenMs = now
+                existing.manufacturerText = "WIFI"
+                existing.manufacturerDataText = if (r.capabilities.isNullOrBlank()) "-" else r.capabilities
+                existing.serviceUuidsText = "FREQ=${r.frequency}"
+                existing.rawAdvText = "SSID=${if (ssid.isEmpty()) "<hidden>" else ssid}"
             }
 
             val cls = classifyDevice(BleStore.devices[bssid]!!)
@@ -983,6 +1038,7 @@ class MainActivity : Activity() {
             ids.contains(0x0075) -> "SAMSNG"
             ids.contains(0x00E0) -> "GOOGL"
             ids.contains(0x00D2) -> "NRDIC"
+            ids.contains(0x09C8) -> "XUNTONG"
             else -> String.format("%04X", ids.first())
         }
     }
