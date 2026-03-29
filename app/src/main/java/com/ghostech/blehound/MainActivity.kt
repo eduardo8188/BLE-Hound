@@ -19,6 +19,8 @@ import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.media.AudioManager
 import android.media.ToneGenerator
+import android.media.RingtoneManager
+import android.net.Uri
 import android.net.wifi.WifiManager
 import android.os.Bundle
 import android.os.Handler
@@ -76,6 +78,7 @@ object BleStore {
     var trackerSeenThisSession = false
     var lastNotifyMs = 0L
     var lastPacketSeenMs = 0L
+    var lastDiscoveryChangeMs = 0L
     var lastScanRestartMs = 0L
     var lastDroneBeepMs = 0L
     var dronePresent = false
@@ -258,6 +261,7 @@ class MainActivity : Activity() {
     private lateinit var stopButton: Button
     private lateinit var vibrateButton: Button
     private lateinit var soundButton: Button
+    private lateinit var settingsButtonView: TextView
     private lateinit var listView: ListView
     private lateinit var adapter: DeviceListAdapter
 
@@ -327,7 +331,7 @@ class MainActivity : Activity() {
             }
 
             val cls = classifyDevice(BleStore.devices[bssid]!!)
-            if (isAlertCategory(cls)) notifyDeviceDetected()
+            if (isAlertCategory(cls)) notifyDeviceDetected(cls)
         }
         if (!BleStore.isListFrozen) uiDirty = true
         updateHeaderCounts()
@@ -384,9 +388,17 @@ class MainActivity : Activity() {
 
             // BLE watchdog restart
             if (isScannerActive && BleStore.shouldScan) {
-                val staleFor = now - BleStore.lastPacketSeenMs
+                val packetStaleFor = now - BleStore.lastPacketSeenMs
+                val discoveryStaleFor = now - BleStore.lastDiscoveryChangeMs
                 val restartedAgo = now - BleStore.lastScanRestartMs
-                if (BleStore.lastPacketSeenMs > 0L && staleFor > 12000L && restartedAgo > 5000L) {
+
+                if (
+                    restartedAgo > 5000L &&
+                    (
+                        (BleStore.lastPacketSeenMs > 0L && packetStaleFor > 12000L) ||
+                        (BleStore.lastDiscoveryChangeMs > 0L && discoveryStaleFor > 15000L)
+                    )
+                ) {
                     restartScanSession("watchdog")
                 }
             }
@@ -420,7 +432,7 @@ class MainActivity : Activity() {
             background = GradientDrawable(
                 GradientDrawable.Orientation.TOP_BOTTOM,
                 intArrayOf(0xFF2A0000.toInt(), 0xFF140000.toInt(), 0xFF000000.toInt())
-            ).apply { setStroke(dp(1), 0xFFFF2200.toInt()) }
+            ).apply { setStroke(dp(1), themeColor(this@MainActivity)) }
         }
 
         flameTitleView = TextView(this).apply {
@@ -434,7 +446,7 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER
             textSize = 26f
             typeface = Typeface.create("sans-serif-black", Typeface.BOLD_ITALIC)
-            setTextColor(0xFFFF5A1F.toInt())
+            setTextColor(themeColor(this@MainActivity))
             setShadowLayer(22f, 0f, 0f, 0xFFFF1E00.toInt())
             letterSpacing = 0.12f
             setPadding(0, 0, 0, dp(6))
@@ -495,11 +507,11 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER
         }
 
-        val settingsButton = TextView(this).apply {
+        settingsButtonView = TextView(this).apply {
             text = "⚙"
-            textSize = 22f
+            textSize = 30f
             typeface = Typeface.DEFAULT_BOLD
-            setTextColor(0xFFFF5533.toInt())
+            setTextColor(themeColor(this@MainActivity))
             setPadding(0, 0, 0, 0)
             setOnClickListener {
                 startActivity(Intent(this@MainActivity, SettingsActivity::class.java))
@@ -552,7 +564,7 @@ class MainActivity : Activity() {
             )
         )
         headerShell.addView(
-            settingsButton,
+            settingsButtonView,
             FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.WRAP_CONTENT,
                 FrameLayout.LayoutParams.WRAP_CONTENT,
@@ -607,6 +619,14 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        flameTitleView.setTextColor(themeColor(this))
+        if (::settingsButtonView.isInitialized) settingsButtonView.setTextColor(themeColor(this))
+        refreshHellButtonOutline(startButton)
+        refreshHellButtonOutline(stopButton)
+        refreshHellButtonOutline(vibrateButton)
+        refreshHellButtonOutline(soundButton)
+        updateFlameHeader()
+        listView.invalidateViews()
         renderDeviceList()
     }
 
@@ -640,11 +660,15 @@ class MainActivity : Activity() {
     private fun updateFlameHeader() {
         val tick = animationTick % 4
 
-        val titleColor = when (tick) {
-            0 -> 0xFFFF5A1F.toInt()
-            1 -> 0xFFFF7A1F.toInt()
-            2 -> 0xFFFFB347.toInt()
-            else -> 0xFFFF3B1F.toInt()
+        val titleColor = if (isDefaultTheme(this)) {
+            when (tick) {
+                0 -> 0xFFFF5A1F.toInt()
+                1 -> 0xFFFF6A2A.toInt()
+                2 -> 0xFFFF7A35.toInt()
+                else -> 0xFFFF6A2A.toInt()
+            }
+        } else {
+            themeColor(this)
         }
 
         val glowColor = when (tick) {
@@ -675,7 +699,7 @@ class MainActivity : Activity() {
             GradientDrawable.Orientation.TOP_BOTTOM,
             intArrayOf(topColor, midColor, 0xFF000000.toInt())
         ).apply {
-            setStroke(dp(1), 0xFFFF2200.toInt())
+            setStroke(dp(1), themeColor(this@MainActivity))
         }
     }
 
@@ -745,9 +769,16 @@ class MainActivity : Activity() {
                 intArrayOf(0xFF6A0000.toInt(), 0xFF260000.toInt())
             ).apply {
                 cornerRadius = dp(18).toFloat()
-                setStroke(dp(1), 0xFFFF4400.toInt())
+                setStroke(dp(1), themeColor(this@MainActivity))
             }
             setPadding(dp(10), dp(14), dp(10), dp(14))
+        }
+    }
+
+    private fun refreshHellButtonOutline(button: Button) {
+        val bg = button.background
+        if (bg is GradientDrawable) {
+            bg.setStroke(dp(1), themeColor(this))
         }
     }
 
@@ -798,7 +829,53 @@ class MainActivity : Activity() {
     // Notifications - fires for ANY alert category
     // ---------------------------------------------------------------
 
-    private fun notifyDeviceDetected() {
+
+    private fun playCategoryTone(category: String) {
+        val prefs = getSharedPreferences("blehound_prefs", MODE_PRIVATE)
+        val key = when {
+            isTrackerClass(category) -> "sound_trackers"
+            isCyberGadgetClass(category) -> "sound_gadgets"
+            isDroneClass(category) -> "sound_drones"
+            isPoliceClass(category) -> "sound_feds"
+            else -> ""
+        }
+        if (key.isEmpty()) return
+
+        val raw = prefs.getString(key, "__DEFAULT__") ?: "__DEFAULT__"
+
+        if (raw == "__SILENT__") return
+
+        if (raw == "__DEFAULT__") {
+            toneGenerator?.startTone(ToneGenerator.TONE_CDMA_ALERT_CALL_GUARD, 180)
+            uiHandler.postDelayed({
+                toneGenerator?.startTone(ToneGenerator.TONE_CDMA_ALERT_CALL_GUARD, 180)
+            }, 220)
+            return
+        }
+
+        try {
+            RingtoneManager.getRingtone(this, Uri.parse(raw))?.play()
+        } catch (_: Exception) {
+            toneGenerator?.startTone(ToneGenerator.TONE_CDMA_ALERT_CALL_GUARD, 180)
+            uiHandler.postDelayed({
+                toneGenerator?.startTone(ToneGenerator.TONE_CDMA_ALERT_CALL_GUARD, 180)
+            }, 220)
+        }
+    }
+
+    private fun notifyDeviceDetected(category: String) {
+        val prefs = getSharedPreferences("blehound_prefs", MODE_PRIVATE)
+
+        val enabled = when {
+            isTrackerClass(category) -> prefs.getBoolean("notif_trackers", true)
+            isCyberGadgetClass(category) -> prefs.getBoolean("notif_gadgets", true)
+            isDroneClass(category) -> prefs.getBoolean("notif_drones", true)
+            isPoliceClass(category) -> prefs.getBoolean("notif_feds", true)
+            else -> true
+        }
+
+        if (!enabled) return
+
         val now = System.currentTimeMillis()
         if (now - BleStore.lastNotifyMs < 3000) return
         BleStore.lastNotifyMs = now
@@ -815,10 +892,7 @@ class MainActivity : Activity() {
         }
 
         if (BleStore.soundOnTracker) {
-            toneGenerator?.startTone(ToneGenerator.TONE_CDMA_ALERT_CALL_GUARD, 180)
-            uiHandler.postDelayed({
-                toneGenerator?.startTone(ToneGenerator.TONE_CDMA_ALERT_CALL_GUARD, 180)
-            }, 220)
+            playCategoryTone(category)
         }
     }
 
@@ -878,6 +952,8 @@ class MainActivity : Activity() {
                 isScannerActive = true
                 BleStore.lastScanRestartMs = System.currentTimeMillis()
                 BleStore.lastPacketSeenMs = System.currentTimeMillis()
+                BleStore.lastDiscoveryChangeMs = System.currentTimeMillis()
+        BleStore.lastDiscoveryChangeMs = System.currentTimeMillis()
             }
         }
         statusView.text = "TAP ANY DEVICE ROW TO VIEW DETAILS"
@@ -921,6 +997,7 @@ class MainActivity : Activity() {
         }
         isScannerActive = false
         BleStore.lastPacketSeenMs = 0L
+        BleStore.lastDiscoveryChangeMs = 0L
         updateButtonStates()
     }
 
@@ -952,6 +1029,7 @@ class MainActivity : Activity() {
 
             val existing = BleStore.devices[addr]
             if (existing == null) {
+                BleStore.lastDiscoveryChangeMs = now
                 BleStore.devices[addr] = BleSeenDevice(
                     name = name, address = addr, rssi = rssi,
                     packetCount = 1, lastSeenMs = now,
@@ -965,6 +1043,21 @@ class MainActivity : Activity() {
                     rawAdvText = rawAdvText
                 )
             } else {
+                val changed = existing.name != name ||
+                    kotlin.math.abs(existing.rssi - rssi) >= 6 ||
+                    existing.manufacturerText != manufacturerText ||
+                    existing.manufacturerDataText != manufacturerDataText ||
+                    existing.serviceUuidsText != serviceUuidsText ||
+                    existing.serviceDataText != serviceDataText ||
+                    existing.flagsText != flagsText ||
+                    existing.txPowerText != txPowerText ||
+                    existing.appearanceText != appearanceText ||
+                    existing.rawAdvText != rawAdvText
+
+                if (changed) {
+                    BleStore.lastDiscoveryChangeMs = now
+                }
+
                 existing.name = name
                 existing.rssi = rssi
                 existing.packetCount += 1
@@ -1010,7 +1103,7 @@ class MainActivity : Activity() {
             val classText = classifyDevice(BleStore.devices[addr]!!)
             if (isAlertCategory(classText)) {
                 BleStore.trackerSeenThisSession = true
-                notifyDeviceDetected()
+                notifyDeviceDetected(classText)
             }
 
             if (!BleStore.isListFrozen) uiDirty = true
@@ -1205,7 +1298,7 @@ class DeviceListAdapter(
 
     override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
         val item = getItem(position)
-        val rowBg = if (position % 2 == 0) 0xFF8F0A0A.toInt() else 0xFF050505.toInt()
+        val rowBg = if (position % 2 == 0) themedListRowColor(activity) else 0xFF050505.toInt()
         val classText = classifyDevice(item)
 
         val isTracker = isTrackerClass(classText)
@@ -1243,9 +1336,17 @@ class DeviceListAdapter(
         val clippedMfg = item.manufacturerText.take(6)
         val clippedName = item.name.replace("\n", " ").take(nameCharLimit())
 
-        topRow.addView(buildCell(item.rssi.toString(), 0.9f))
-        topRow.addView(buildCell(item.address, 3.0f))
-        topRow.addView(buildCell(clippedMfg, 1.3f))
+        val topTextColor = if (!isDefaultTheme(activity) && rowBg != 0xFF050505.toInt()) 0xFF000000.toInt() else 0xFFFFFFFF.toInt()
+
+        fun buildTopCell(text: String, weight: Float): TextView {
+            return buildCell(text, weight).apply {
+                setTextColor(topTextColor)
+            }
+        }
+
+        topRow.addView(buildTopCell(item.rssi.toString(), 0.9f))
+        topRow.addView(buildTopCell(item.address, 3.0f))
+        topRow.addView(buildTopCell(clippedMfg, 1.3f))
 
         val classColor = when (classText) {
             "AirTag", "Tile", "Galaxy Tag", "Find My" -> 0xFFFFFF00.toInt()
@@ -1255,12 +1356,14 @@ class DeviceListAdapter(
             else -> 0xFFFFFFFF.toInt()
         }
 
-        val classView = TextView(activity).apply {
+        val classView = OutlinedTextView(activity).apply {
             text = classText
             typeface = Typeface.MONOSPACE
             textSize = 11f
             setTextColor(classColor)
-            setPadding(dp(4), dp(8), dp(4), dp(8))
+            strokeColor = 0xFF000000.toInt()
+            strokeWidthPx = if (!isDefaultTheme(activity) && rowBg != 0xFF050505.toInt()) dp(2).toFloat() else 0f
+            setPadding(dp(8), dp(8), dp(4), dp(8))
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.9f)
             isSingleLine = true
             ellipsize = TextUtils.TruncateAt.END
@@ -1275,7 +1378,7 @@ class DeviceListAdapter(
             }
             typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
             textSize = 11f
-            setTextColor(0xFFF2F2F2.toInt())
+            setTextColor(if (isWhiteTheme(activity)) 0xFF000000.toInt() else 0xFFF2F2F2.toInt())
             setPadding(dp(10), dp(6), dp(10), dp(8))
             gravity = Gravity.CENTER_VERTICAL
             isSingleLine = true

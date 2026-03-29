@@ -191,7 +191,7 @@ gatt.discoverServices()
                     0xFF000000.toInt()
                 )
             ).apply {
-                setStroke(dp(1), 0xFFFF2200.toInt())
+                setStroke(dp(1), themeColor(this@DetailActivity))
             }
         }
 
@@ -200,7 +200,7 @@ gatt.discoverServices()
             gravity = Gravity.CENTER
             textSize = 20f
             typeface = Typeface.create("sans-serif-black", Typeface.BOLD_ITALIC)
-            setTextColor(0xFFFF2233.toInt())
+            setTextColor(themeColor(this@DetailActivity))
             setShadowLayer(12f, 0f, 0f, 0xFFFF7700.toInt())
             letterSpacing = 0.08f
             setPadding(0, 0, 0, dp(8))

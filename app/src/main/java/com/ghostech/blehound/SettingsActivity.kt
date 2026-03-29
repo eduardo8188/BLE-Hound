@@ -20,6 +20,7 @@ import androidx.core.content.ContextCompat
 class SettingsActivity : Activity() {
 
     private lateinit var bgButton: Button
+    private var lastThemeHex: String = ""
     private val prefs by lazy { getSharedPreferences("blehound_prefs", MODE_PRIVATE) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -32,80 +33,87 @@ class SettingsActivity : Activity() {
 
         val header = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(18), dp(24), dp(18), dp(14))
+            setPadding(dp(18), dp(12), dp(18), dp(12))
             background = GradientDrawable(
                 GradientDrawable.Orientation.TOP_BOTTOM,
                 intArrayOf(0xFF2A0000.toInt(), 0xFF140000.toInt(), 0xFF000000.toInt())
-            ).apply { setStroke(dp(1), 0xFFFF2200.toInt()) }
+            ).apply { setStroke(dp(1), themeColor(this@SettingsActivity)) }
         }
 
         val title = TextView(this).apply {
-            text = "SETTINGS / ABOUT"
+            text = "SETTINGS"
             gravity = Gravity.CENTER
             textSize = 20f
             typeface = Typeface.create("sans-serif-black", Typeface.BOLD_ITALIC)
-            setTextColor(0xFFFF5522.toInt())
+            setTextColor(themeColor(this@SettingsActivity))
             setShadowLayer(12f, 0f, 0f, 0xFFFF9900.toInt())
         }
 
         header.addView(title)
 
-        val scroll = ScrollView(this)
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(16), dp(16), dp(24))
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                0,
+                1f
+            )
         }
 
         bgButton = buildHellButton("")
-
         bgButton.setOnClickListener { toggleBackground() }
-
         content.addView(bgButton)
 
-        content.addView(sectionTitle("ABOUT CATEGORIES"))
-        content.addView(bodyText("TRACKERS: AirTag, Tile, Galaxy Tag, Find My"))
-        content.addView(bodyText("GADGETS: Flipper Zero, Pwnagotchi, Card Skimmer, Dev Board, WiFi Pineapple"))
-        content.addView(bodyText("DRONES: DJI / Parrot / Skydio / Autel / BLE Remote ID"))
-        content.addView(bodyText("FEDS: Axon and Flock detections"))
+        val notificationsButton = buildHellButton("NOTIFICATIONS")
+        notificationsButton.setOnClickListener {
+            startActivity(Intent(this, NotificationsActivity::class.java))
+        }
+        content.addView(notificationsButton)
 
-        content.addView(sectionTitle("RSSI"))
-        content.addView(bodyText("RSSI stands for Received Signal Strength Indicator. Live RSSI helps estimate relative signal strength while moving around an area, which can help with heat mapping and locating the strongest signal area."))
+        val themeButton = buildHellButton("THEME")
+        themeButton.setOnClickListener {
+            startActivity(Intent(this, ThemeActivity::class.java))
+        }
+        content.addView(themeButton)
 
-        content.addView(sectionTitle("CREATOR"))
-        content.addView(bodyText("Created by GH0ST3CH"))
-
-        val ghButton = buildHellButton("OPEN GH0ST3CH GITHUB")
-        ghButton.setOnClickListener { openUrl("https://github.com/GH0ST3CH") }
-        content.addView(ghButton)
-
-        val supportButton = buildHellButton("SUPPORT ON BUY ME A COFFEE")
-        supportButton.setOnClickListener { openUrl("https://www.buymeacoffee.com/ghostechrepair") }
-        content.addView(supportButton)
-
-        content.addView(sectionTitle("INSPIRED BY"))
-        content.addView(bodyText("HaleHound firmware and ESP Marauder firmware"))
-
-        val halehoundButton = buildHellButton("OPEN HALEHOUND GITHUB")
-        halehoundButton.setOnClickListener { openUrl("https://github.com/JesseCHale/HaleHound-CYD") }
-        content.addView(halehoundButton)
-
-        val marauderButton = buildHellButton("OPEN ESP MARAUDER GITHUB")
-        marauderButton.setOnClickListener { openUrl("https://github.com/justcallmekoko/ESP32Marauder") }
-        content.addView(marauderButton)
+        val aboutButton = buildHellButton("ABOUT")
+        aboutButton.setOnClickListener {
+            startActivity(Intent(this, AboutActivity::class.java))
+        }
+        content.addView(aboutButton)
 
         val backButton = buildHellButton("BACK")
         backButton.setOnClickListener { finish() }
-        content.addView(backButton)
 
-        scroll.addView(content)
         root.addView(header)
-        root.addView(scroll)
+        root.addView(content)
+
+        val backContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(0), dp(16), dp(20))
+        }
+        backContainer.addView(backButton)
+        root.addView(backContainer)
+
         setContentView(root)
 
+        lastThemeHex = themeHex(this)
         refreshButtons()
     }
 
 
+
+
+    override fun onResume() {
+        super.onResume()
+        val current = themeHex(this)
+        if (lastThemeHex.isNotEmpty() && current != lastThemeHex) {
+            recreate()
+            return
+        }
+        lastThemeHex = current
+    }
 
     private fun toggleBackground() {
         val enabled = !prefs.getBoolean("background_enabled", false)
@@ -209,7 +217,7 @@ class SettingsActivity : Activity() {
             intArrayOf(0xFF6A0000.toInt(), 0xFF260000.toInt())
         ).apply {
             cornerRadius = dp(18).toFloat()
-            setStroke(dp(1), 0xFFFF4400.toInt())
+            setStroke(dp(1), themeColor(this@SettingsActivity))
         }
         setPadding(dp(10), dp(14), dp(10), dp(14))
     }
